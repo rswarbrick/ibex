@@ -184,40 +184,39 @@ module ibex_if_stage #(
   if (ICache) begin : gen_icache
     // Full I-Cache option
     ibex_icache #(
-      .ICacheECC (ICacheECC)
+      .BranchPredictor (BranchPredictor),
+      .ICacheECC       (ICacheECC)
     ) icache_i (
-        .clk_i             ( clk_i                       ),
-        .rst_ni            ( rst_ni                      ),
+        .clk_i               ( clk_i                      ),
+        .rst_ni              ( rst_ni                     ),
 
-        .req_i             ( req_i                       ),
+        .req_i               ( req_i                      ),
 
-        .branch_i          ( branch_req                  ),
-        .branch_spec_i     ( branch_spec                 ),
-        .addr_i            ( {fetch_addr_n[31:1], 1'b0}  ),
+        .branch_i            ( branch_req                 ),
+        .branch_spec_i       ( branch_spec                ),
+        .predicted_branch_i  ( predicted_branch           ),
+        .branch_mispredict_i ( nt_branch_mispredict_i     ),
+        .addr_i              ( {fetch_addr_n[31:1], 1'b0} ),
 
-        .ready_i           ( fetch_ready                 ),
-        .valid_o           ( fetch_valid                 ),
-        .rdata_o           ( fetch_rdata                 ),
-        .addr_o            ( fetch_addr                  ),
-        .err_o             ( fetch_err                   ),
-        .err_plus2_o       ( fetch_err_plus2             ),
+        .ready_i             ( fetch_ready                ),
+        .valid_o             ( fetch_valid                ),
+        .rdata_o             ( fetch_rdata                ),
+        .addr_o              ( fetch_addr                 ),
+        .err_o               ( fetch_err                  ),
+        .err_plus2_o         ( fetch_err_plus2            ),
 
-        .instr_req_o       ( instr_req_o                 ),
-        .instr_addr_o      ( instr_addr_o                ),
-        .instr_gnt_i       ( instr_gnt_i                 ),
-        .instr_rvalid_i    ( instr_rvalid_i              ),
-        .instr_rdata_i     ( instr_rdata_i               ),
-        .instr_err_i       ( instr_err_i                 ),
-        .instr_pmp_err_i   ( instr_pmp_err_i             ),
+        .instr_req_o         ( instr_req_o                ),
+        .instr_addr_o        ( instr_addr_o               ),
+        .instr_gnt_i         ( instr_gnt_i                ),
+        .instr_rvalid_i      ( instr_rvalid_i             ),
+        .instr_rdata_i       ( instr_rdata_i              ),
+        .instr_err_i         ( instr_err_i                ),
+        .instr_pmp_err_i     ( instr_pmp_err_i            ),
 
-        .icache_enable_i   ( icache_enable_i             ),
-        .icache_inval_i    ( icache_inval_i              ),
-        .busy_o            ( prefetch_busy               )
+        .icache_enable_i     ( icache_enable_i            ),
+        .icache_inval_i      ( icache_inval_i             ),
+        .busy_o              ( prefetch_busy              )
     );
-    // Branch predictor tie-offs (which are unused when the instruction cache is enabled)
-    logic unused_nt_branch_mispredict, unused_predicted_branch;
-    assign unused_nt_branch_mispredict  = nt_branch_mispredict_i;
-    assign unused_predicted_branch = predicted_branch;
   end else begin : gen_prefetch_buffer
     // prefetch buffer, caches a fixed number of instructions
     ibex_prefetch_buffer #(
