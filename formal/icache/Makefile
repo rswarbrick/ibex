@@ -7,11 +7,14 @@
 # Whether to use ECC (0 for disabled; 1 for enabled)
 ECC := 0
 
+# Whether to enable the branch predictor (0 for disable; 1 for enabled)
+BRANCH_PREDICTOR := 0
+
 core-name   := lowrisc:fpv:ibex_icache_fpv
 vlnv        := $(subst :,_,$(core-name))
 build-root  := $(abspath ../../build/$(vlnv))
 
-fusesoc-params := --ICacheECC=$(ECC)
+fusesoc-params := --ICacheECC=$(ECC) --BranchPredictor=$(BRANCH_PREDICTOR)
 
 # Since we have a hacky hook that runs sv2v in place on fusesoc's
 # copied source files, we have to generate different build roots for

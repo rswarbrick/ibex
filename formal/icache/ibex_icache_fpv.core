@@ -24,10 +24,17 @@ parameters:
     paramtype: vlogparam
     description: "Enable ECC protection in instruction cache"
 
+  BranchPredictor:
+    datatype: int
+    paramtype: vlogparam
+    default: 0
+    description: "Enable static branch prediction"
+
 targets:
   prove: &prove
     parameters:
       - ICacheECC
+      - BranchPredictor
     filesets:
       - all
     toplevel: ibex_icache

@@ -61,6 +61,7 @@ module formal_tb #(
    input logic                                busy_o,
 
    // Internal signals
+   input logic [ADDR_W-1:0]                   branch_mispredict_addr,
    input logic [ADDR_W-1:0]                   prefetch_addr_q,
    input logic [NUM_FB-1:0][NUM_FB-1:0]       fill_older_q,
    input logic [NUM_FB-1:0]                   fill_busy_q,
@@ -119,12 +120,30 @@ module formal_tb #(
       f_addr_valid <= 1'b0;
     end else begin
       if (branch_i) begin
-        f_addr_valid = 1'b1;
+        f_addr_valid <= 1'b1;
       end else if (valid_o & ready_i & err_o) begin
-        f_addr_valid = 1'b0;
+        f_addr_valid <= 1'b0;
       end
     end
   end
+
+  // If branch_i and predicted_branch_i are set, this is a speculative branch: we might be going the
+  // wrong way. If necessary, the core will figure out that it was wrong on the following
+  // instruction pop. Here, we track a "this might get cancelled" signal.
+  logic f_spec_branch;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      f_spec_branch <= 1'b0;
+    end else begin
+      if (branch_i & predicted_branch_i) begin
+        f_spec_branch <= 1'b1;
+      end else if (valid_o & ready_i) begin
+        f_spec_branch <= 1'b0;
+      end
+    end
+  end
+  // Assertion needed for induction
+  `ASSERT(spec_branch_implies_valid, `IMPLIES(f_spec_branch, f_addr_valid))
 
   // Reset assumptions
   //
@@ -150,6 +169,11 @@ module formal_tb #(
   `ASSUME(gate_bs, `IMPLIES(branch_i, branch_spec_i))
   // Ready will not be asserted when req_i is low
   `ASSUME(ready_implies_req_i, `IMPLIES(ready_i, req_i))
+  // predicted_branch_i may only be set if we've already got an address (otherwise we can't cancel
+  // the prediction)
+  `ASSUME(no_prediction_without_addr, `IMPLIES(predicted_branch_i, f_addr_valid))
+  // branch_mispredict_i is only ever asserted on the instruction pop after a branch prediction
+  `ASSUME(mispredict_after_branch, `IMPLIES(branch_mispredict_i, f_spec_branch))
 
   // Assumptions about the instruction bus
   //
@@ -205,15 +229,22 @@ module formal_tb #(
 
   //  VALID until READY
   //
-  //  The handshake isn't quite standard, because the core can cancel it by signalling branch_i,
-  //  redirecting the icache somewhere else. So we ask that once valid_o goes high, it won't be
-  //  de-asserted unless either ready_i was high on the previous cycle (in which case, the icache
-  //  sent an instruction to the core) or branch_i goes high.
+  //  The handshake isn't quite standard, because the core can cancel it by signalling branch_i or
+  //  branch_mispredict_i, redirecting the icache somewhere else. So we ask that once valid_o goes
+  //  high, it won't be de-asserted unless one of the following conditions hold:
+  //
+  //    1. ready_i was high on the previous cycle (in which case, the icache sent an instruction to
+  //       the core).
+  //
+  //    2. branch_i was high on the previous cycle (in which case the cache was told to go somewhere
+  //       else).
+  //
+  //    3. branch_mispredict_i is high (in which case the cache should immediately drop valid_o)
   //
   //  We also have no requirements on the valid/ready handshake if the address is unknown
   //  (!f_addr_valid).
   `ASSERT(vld_to_rdy,
-          `IMPLIES(f_addr_valid & $fell(valid_o), $past(branch_i | ready_i)))
+          `IMPLIES(f_addr_valid & $fell(valid_o), branch_mispredict_i | $past(branch_i | ready_i)))
 
   //  ADDR stability
   `ASSERT(addr_stable,
@@ -435,6 +466,11 @@ module formal_tb #(
                      (fill_out_cnt_q[fb] <= fill_rvd_beat[fb])))
   end
 
+  // If we're speculatively filling a buffer after a predicted branch, we might change our minds. In
+  // this case, branch_mispredict_addr_q holds the address to which we redirect. This will always be
+  // half-word aligned.
+  `ASSERT(mispredict_addr_hw_aligned, `IMPLIES(f_spec_branch, ~branch_mispredict_addr[0]))
+
   // The prefetch address is the next address to prefetch. It should always be at least half-word
   // aligned (it's populated by addr_i and then gets aligned to line boundaries afterwards)
   `ASSERT(prefetch_addr_hw_aligned, `IMPLIES(f_addr_valid, ~prefetch_addr_q[0]))
@@ -608,7 +644,7 @@ module formal_tb #(
   `ASSERT(fill_data_sel_one_hot,
           `IS_ONE_HOT(fill_data_sel & fill_busy_q & ~fill_out_done & ~fill_stale_q, NUM_FB))
 
-  // fill_data_reg is based off of fill_data_sel and *should* be 1-hot (used for muxing)
+  // fill_data_reg is based on fill_data_sel and *should* be 1-hot (used for muxing)
   `ASSERT(fill_data_reg_one_hot, `IS_ONE_HOT(fill_data_reg, NUM_FB))
 
 
@@ -671,8 +707,9 @@ module formal_tb #(
   //    for beat b and the memory request was squashed by a PMP error.
   //
   // The former case is easy (bit b should be set in f_fill_rvd_mask). In the latter case,
-  // fill_ext_done_d will be true, fill_ext_cnt_q will be less than LINE_BEATS, and fill_ext_off (the
-  // next beat to fetch) will equal b. We define explicit masks for the bits allowed in each case.
+  // fill_ext_done_d will be true, fill_ext_cnt_q will be less than LINE_BEATS, and fill_ext_off
+  // (the next beat to fetch) will equal b. We define explicit masks for the bits allowed in each
+  // case.
   logic [NUM_FB-1:0][LINE_BEATS-1:0] f_rvd_err_mask, f_pmp_err_mask, f_err_mask;
   always_comb begin
     f_rvd_err_mask = '0;
