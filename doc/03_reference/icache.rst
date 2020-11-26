@@ -38,6 +38,11 @@ The following table describes the available configuration parameters.
 +-------------------------+-----------+-----------------------------------------------+
 | Parameter               | Default   | Description                                   |
 +=========================+===========+===============================================+
+| ``BranchPredictor``     | ``1'b0``  | When set, the cache allows branch prediction, |
+|                         |           | using ``predicted_branch_i`` to start         |
+|                         |           | fetching speculatively and                    |
+|                         |           | ``branch_mispredict_i`` to roll back.         |
++-------------------------+-----------+-----------------------------------------------+
 | ``BusWidth``            | ``32``    | Width of instruction bus. Note, this is fixed |
 |                         |           | at 32 for Ibex at the moment.                 |
 +-------------------------+-----------+-----------------------------------------------+
@@ -196,12 +201,15 @@ Requests are inserted to invalidate the tag RAM for all ways in each cache line 
 While the invalidation is in-progress, lookups and instruction fetches can proceed, but nothing will be allocated to the cache.
 
 Detailed behaviour
-^^^^^^^^^^^^^^^^^^
+------------------
 
 This section describes the expected behaviour of the cache, in order to allow functional verification.
 This isn't an attempt to describe the cache's performance characteristics.
 
 The I$ has a single clock (``clk_i``) and asynchronous reset (``rst_ni``).
+
+Fetching from memory
+^^^^^^^^^^^^^^^^^^^^
 
 Data is requested from the instruction memory with the ports prefixed by ``instr_``. These work as described in :ref:`instruction-fetch`.
 Note that there's one extra port on the I$, which doesn't appear at the ``ibex_core`` top-level.
@@ -211,59 +219,106 @@ If that happens, the cache drops ``instr_req_o`` and stops making any further re
 Note that it is possible for ``instr_gnt_i`` and ``instr_pmp_err_i`` to be high on the same cycle.
 In that case, the error signal takes precedence.
 
-Fetched instructions are returned to the core using ports ``ready_i``, ``valid_o``, ``rdata_o``, ``addr_o``, ``err_o`` and ``err_plus2_o``.
-This interface uses a form of ready/valid handshaking.
-A transaction is signalled by ready and valid being high.
-If valid goes high, it will remain high and the other output signals will remain stable until the transaction goes through or is cancelled by ``branch_i`` being asserted.
-The only exception is after an error is passed to the core. Once that has happened, there is no constraint on the values of ``valid_o``, ``rdata_o``, ``addr_o``, ``err_o`` and ``err_plus2_o`` until the next time ``branch_i`` is asserted.
-There is no constraint on the behaviour of ``ready_i``.
-
-The 32-bit wide ``rdata_o`` signal contains instruction data fetched from ``addr_o``.
-An instruction is either 16 or 32 bits wide (called *compressed* or *uncompressed*, respectively).
-The width of an instruction can be calculated from its bottom two bits: an instruction is uncompressed if they equal ``2'b11`` and compressed otherwise.
-If there is a compressed instruction in the lower 16 bits, the upper 16 bits are unconstrained (and may change even after valid has been asserted).
-The ``err_o`` signal will be high if the instruction fetch failed (either with ``instr_pmp_err_i`` or ``instr_err_i``); in this case ``rdata_o`` is not specified.
+Passing instructions to the core
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
 The ``req_i`` signal tells the cache that the core is awake and will start requesting instructions soon.
 As well as the main cache memory, the I$ contains a prefetch buffer.
 The cache fills this buffer by issuing fetches when ``req_i`` is high.
 If ``req_i`` becomes false, the cache may do a few more instruction fetches to fill a cache line, but will stop fetching when that is done.
 The cache will not do any instruction fetches after this until ``req_i`` goes high again.
-A correctly behaving core should not not assert ``ready_i`` when ``req_i`` is low.
+The core must not assert ``ready_i`` when ``req_i`` is low.
 
-Inside the cache is an address counter.
-If ``branch_i`` is asserted then the address counter will be set to ``addr_i`` and the next instruction that is passed to the core will be the one fetched from that address.
-The address is required to be halfword aligned, so ``addr_i[0]`` must be zero.
-The cache will also start reading into a new prefetch buffer, storing the current contents into the main cache memory or discarding it (see ``icache_enable_i`` below).
+An instruction is either 16 or 32 bits wide (called *compressed* or *uncompressed*, respectively).
+The width of an instruction can be calculated from its bottom two bits: an instruction is uncompressed if they equal ``2'b11`` and is compressed otherwise.
+
+When ``req_i`` has been asserted, fetched instructions are sent to the core using ports ``ready_i``, ``valid_o``, ``rdata_o``, ``addr_o``, ``err_o`` and ``err_plus2_o``.
+This interface uses a form of ready/valid handshaking.
+A transaction is signalled by ``ready_i`` and ``valid_o`` being high.
+A transaction is cancelled by the core asserting ``branch_i`` or ``branch_mispredict_i``.
+The handshake protocol imposes no constraint on the behaviour of ``ready_i``.
+
+When the cache has data to pass to the core, it asserts ``valid_o`` and sets ``rdata_o`` and ``addr_o``.
+In this case, ``err_o`` is held low.
+The 32-bit wide ``rdata_o`` signal contains instruction data fetched from ``addr_o``.
+If there is a compressed instruction in the lower 16 bits, the upper 16 bits are unconstrained (and may change even after valid has been asserted).
+These signals will remain stable until the transaction goes through or is cancelled.
+The value of ``err_plus2_o`` is unconstrained.
+
+If the cache is reporting an error to the core, it asserts ``valid_o`` and ``err_o``.
+It also asserts ``err_plus2_o`` if the error was caused by fetching the second half of an unaligned uncompressed instruction.
+The core will use this signal to record the correct address in the ``mtval`` CSR upon an error.
+These three signals will remain stable until the transaction goes through or is cancelled.
+The values of ``rdata_o`` and ``addr_o`` are unconstrained.
+
+After the cache sends an error to the core, there is no constraint on the values of ``valid_o``, ``rdata_o``, ``addr_o``, ``err_o`` and ``err_plus2_o`` until the next time ``branch_i`` or ``branch_mispredict_i`` is asserted.
+As described below, the core must not assert ``ready_i`` until then.
+
+Control flow
+^^^^^^^^^^^^
+
+The cache has an internal address counter.
+The core can set this counter by asserting ``branch_i`` and supplying the address as ``addr_i``.
+The supplied address is required to be halfword aligned, so ``addr_i[0]`` must be zero.
+The next instruction sent to the core will be the instruction at ``addr_i``.
+
 On cycles where ``branch_i`` is not asserted, the address counter will be incremented when an instruction is passed to the core.
 This increment depends on the instruction data (visible at ``rdata_o``): it will be 2 if the instruction is compressed and 4 otherwise.
-Since the contents of ``rdata_o`` are not specified if an instruction fetch has caused an error, the core must signal a branch before accepting another instruction after it sees ``err_o``.
+The core will receive a straight-line sequence of instructions until it asserts ``branch_i`` again.
 
-There is an additional branch signal ``branch_spec_i`` which is a speculative version of the actual branch signal.
-Internally, ``branch_spec_i`` is used to setup address multiplexing as it is available earlier in the cycle.
+The cache's address counter is uninitialised when the cache comes out of reset, so the core must only start requesting instructions (by asserting ``req_i``) on or after the first time it asserts ``branch_i``.
+If it did so earlier, there would be nothing to stop the cache fetching from arbitrary addresses.
+Similarly, if the cache reports an error to the core, this means that it doesn't know the corresponding instruction bits and the internal counter becomes indeterminate.
+In this case, the core must not assert ``ready_i`` again until it asserts ``branch_i`` to tell the cache what instruction to fetch.
+
+There is an additional branch signal, ``branch_spec_i``.
+This is a speculative version of the actual branch signal.
+Internally, ``branch_spec_i`` is used to set up address multiplexing as it is available earlier in the cycle.
 In cases where ``branch_spec_i`` is high, but ``branch_i`` is low, any lookup that might have been made that cycle is suppressed.
 Note that if ``branch_i`` is high, ``branch_spec_i`` must also be high.
 
-Because a single instruction can span two 32bit memory addresses, an extra signal (``err_plus2_o``) indicates when an error is caused by the second half of an unaligned uncompressed instruction.
-This signal is only valid when ``valid_o`` and ``err_o`` are set, and will only be set for uncompressed instructions.
-The core uses this signal to record the correct address in the ``mtval`` CSR upon an error.
+Branch prediction
+^^^^^^^^^^^^^^^^^
 
-Since the address counter is not initialised on reset, the behaviour of the I$ is unspecified unless ``branch_i`` is asserted on or before the first cycle that ``req_i`` is asserted after reset.
-If that is not true, there's nothing to stop the cache fetching from random addresses.
+If branch prediction is enabled (by setting the ``BranchPredictor`` parameter), the core can signal a predicted branch by asserting ``predicted_branch_i``.
+This must only be asserted if ``branch_i`` is also asserted.
+The signal means that this branch was predicted, possibly incorrectly.
 
-The ``icache_enable_i`` signal controls whether the cache copies fetched data from the prefetch buffer to the main cache memory.
-If the signal is false, fetched data will be discarded on a branch or after enough instructions have been consumed by the core.
-On reset, or whenever ``icache_inval_i`` goes high, the cache will invalidate its stored data.
-While doing this, the cache behaves as if ``icache_enable_i`` is false and will not store any fetched data.
+The core can cancel the prediction by asserting ``branch_mispredict_i``.
+Doing so tells the cache to jump back to the straight-line address that it jumped from.
+The core must only assert ``branch_mispredict_i`` after asserting ``predicted_branch_i`` and on or before the next cycle where it asserts ``ready_i`` or ``branch_i``.
+
+If ``branch_mispredict_i`` and ``branch_i`` are asserted together, the core was about to realise that it had mis-predicted a branch but (on the same cycle) it has taken an exception and is redirecting to the exception vector.
+In this case, the cache obeys ``branch_i`` rather than ``branch_mispredict_i``.
+
+If the ``BranchPredictor`` parameter is zero, the core must never assert ``predicted_branch_i`` or ``branch_mispredict_i``.
+
+Caching and invalidation
+^^^^^^^^^^^^^^^^^^^^^^^^
+
+Caching is enabled by setting the ``icache_enable_i`` signal.
+If caching is disabled, addresses will not be looked up in the cache and fill buffers will always be filled from the bus.
+When a fill buffer is completed and its contents have been passed to the core, they will be discarded.
+
+If caching is enabled, addresses are looked up in the cache, so fill buffers may be filled from the bus or from the cache.
+When a fill buffer is completed, its contents are written to the cache.
+
+The cache is invalidated when coming out of reset.
+It can also be invalidated by asserting ``icache_inval_i``.
+This takes several hundred cycles (while the cache clears its backing SRAM).
+During this time, the cache behaves as if ``icache_enable_i`` is false and will not look up or store any fetched data.
 
 .. note::
-   The rules for ``icache_enable_i`` and ``icache_inval_i`` mean that, in order to be completely sure of executing newly fetched code, the core should raise the ``icache_inval_i`` line for at least a cycle and then should branch. The Ibex core does this in response to a ``FENCE.I`` instruction, branching explicitly to the next PC.
-
-The ``busy_o`` signal is guaranteed to be high while the cache is invalidating its internal memories or whenever it has a pending fetch on the instruction bus.
-When the ``busy_o`` signal is low, it is safe to clock gate the cache.
+   The rules for ``icache_enable_i`` and ``icache_inval_i`` mean that, in order to be completely sure of executing newly fetched code, the core should raise the ``icache_inval_i`` line and then branch. The Ibex core does this in response to a ``FENCE.I`` instruction, branching explicitly to the next PC.
 
 The cache doesn't have circuitry to avoid inconsistent multi-way hits.
 As such, the core must never fetch from an address with the cache enabled after modifying the data at that address, without first starting a cache invalidation.
 
 .. note::
    This is a constraint on *software*, not just on the core.
+
+Clock gating
+^^^^^^^^^^^^
+
+The ``busy_o`` signal is guaranteed to be high while the cache is invalidating its internal memories or whenever it has a pending fetch on the instruction bus.
+When the ``busy_o`` signal is low, it is safe to clock gate the cache.
