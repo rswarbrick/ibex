@@ -759,8 +759,10 @@ module ibex_tracer (
   end
 
   always_comb begin
+    /* verilator lint_off MULTIDRIVEN */
     decoded_str = "";
     data_accessed = 5'h0;
+    /* verilator lint_on MULTIDRIVEN */
     insn_is_compressed = 0;
 
     // Check for compressed instructions
