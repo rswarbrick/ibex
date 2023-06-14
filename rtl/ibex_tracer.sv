@@ -81,7 +81,7 @@ module ibex_tracer (
 
   import ibex_tracer_pkg::*;
 
-  int          file_handle;
+  int          xfile_handle;
   string       file_name;
 
   int unsigned cycle;
@@ -110,6 +110,8 @@ module ibex_tracer (
   function automatic void printbuffer_dumpline();
     string rvfi_insn_str;
 
+    int    file_handle = xfile_handle;
+
     if (file_handle == 32'h0) begin
       string file_name_base = "trace_core";
       void'($value$plusargs("ibex_tracer_file_base=%s", file_name_base));
@@ -119,6 +121,8 @@ module ibex_tracer (
       file_handle = $fopen(file_name, "w");
       $fwrite(file_handle,
               "Time\tCycle\tPC\tInsn\tDecoded instruction\tRegister and memory contents\n");
+
+      xfile_handle <= file_handle;
     end
 
     // Write compressed instructions as four hex digits (16 bit word), and
@@ -746,8 +750,8 @@ module ibex_tracer (
 
   // close output file for writing
   final begin
-    if (file_handle != 32'h0) begin
-      $fclose(file_handle);
+    if (xfile_handle != 32'h0) begin
+      $fclose(xfile_handle);
     end
   end
 
