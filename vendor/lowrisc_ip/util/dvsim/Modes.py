@@ -2,6 +2,7 @@
 # Licensed under the Apache License, Version 2.0, see LICENSE for details.
 # SPDX-License-Identifier: Apache-2.0
 
+from copy import deepcopy
 import logging as log
 import pprint
 import sys
@@ -404,13 +405,16 @@ class Tests(RunModes):
                 val = getattr(test_obj, attr)
                 default_val = attrs[attr]
                 if val == default_val:
-                    global_val = None
-                    # Check if we can find a default in sim_cfg
-                    if hasattr(sim_cfg, attr):
-                        global_val = getattr(sim_cfg, attr)
-
+                    # If sim_cfg specifies a value for this attribute and this
+                    # value isn't equal to default_val, then copy the sim_cfg
+                    # value across to the test object.
+                    global_val = getattr(sim_cfg, attr, None)
                     if global_val is not None and global_val != default_val:
-                        setattr(test_obj, attr, global_val)
+
+                        # TODO: This is a workaround for a memory usage bug
+                        # that triggered issue #20550. It's a pretty hacky
+                        # solution! We should probably tidy this up properly.
+                        setattr(test_obj, attr, deepcopy(global_val))
 
             # Unpack the build mode for this test
             build_mode_objs = Modes.find_and_merge_modes(test_obj,
